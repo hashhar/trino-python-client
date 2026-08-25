@@ -2105,6 +2105,35 @@ def test_heartbeat_head_requests_during_spooled_download(run_trino):
     _assert_heartbeats_sent(session, query_id)
 
 
+@pytest.mark.parametrize("heartbeat_interval, expect_heartbeats", [(0.2, True), (None, False)])
+def test_heartbeat_head_requests_while_caller_is_slow(run_trino, heartbeat_interval, expect_heartbeats):
+    host, port = run_trino
+    session = _HeadCountingSession()
+    conn = trino.dbapi.Connection(
+        host=host, port=port, user="test", source="test",
+        max_attempts=1, encoding=None, heartbeat_interval=heartbeat_interval,
+        http_session=session,
+    )
+
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM tpch.tiny.lineitem")
+    query_id = cur.query_id
+    # Each fetched row checks whether a full interval passed since the last
+    # processed response and sends a HEAD if so. Model a slow consumer that
+    # asks for one row at a time with a pause between requests longer than
+    # the interval.
+    for _ in range(3):
+        assert cur.fetchone() is not None
+        t.sleep(0.3)
+    cur.fetchall()
+    cur.close()
+
+    if expect_heartbeats:
+        _assert_heartbeats_sent(session, query_id)
+    else:
+        assert _heartbeat_head_urls(session, query_id) == []
+
+
 def get_cursor(legacy_prepared_statements, run_trino):
     host, port = run_trino
 
